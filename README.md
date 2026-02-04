@@ -10,7 +10,7 @@ Applications are expected to have a `tactility.properties` file with content lik
 
 ```properties
 [sdk]
-version = 2.4.0
+version = 3.2.0
 ```
 
 ## Example usages
