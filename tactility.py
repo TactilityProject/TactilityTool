@@ -10,15 +10,17 @@ import urllib.request
 import zipfile
 import requests
 import tarfile
+from urllib.parse import urlparse
 
 ttbuild_path = ".tactility"
-ttbuild_version = "3.2.0"
+ttbuild_version = "3.3.0"
 ttbuild_cdn = "https://cdn.tactilityproject.org"
 ttbuild_sdk_json_validity = 3600  # seconds
 ttport = 6666
 verbose = False
 use_local_sdk = False
 local_base_path = None
+http_timeout_seconds = 10
 
 shell_color_red = "\033[91m"
 shell_color_orange = "\033[93m"
@@ -31,17 +33,17 @@ def print_help():
     print("Usage: python tactility.py [action] [options]")
     print("")
     print("Actions:")
-    print("  build [esp32,esp32s3]          Build the app. Optionally specify a platform.")
-    print("    esp32:         ESP32")
-    print("    esp32s3:       ESP32 S3")
+    print("  build [platform]              Build the app. Optionally specify a platform.")
+    print("    Supported platforms are lower case. Example: esp32s3")
+    print("    Supported platforms are read from manifest.properties")
     print("  clean                          Clean the build folders")
     print("  clearcache                     Clear the SDK cache")
     print("  updateself                     Update this tool")
     print("  run [ip]                       Run the application")
     print("  install [ip]                   Install the application")
     print("  uninstall [ip]                 Uninstall the application")
-    print("  bir [ip] [esp32,esp32s3]       Build, install then run. Optionally specify a platform.")
-    print("  brrr [ip] [esp32,esp32s3]      Functionally the same as \"bir\", but \"app goes brrr\" meme variant.")
+    print("  bir [ip] [platform]           Build, install then run. Optionally specify a platform.")
+    print("  brrr [ip] [platform]          Functionally the same as \"bir\", but \"app goes brrr\" meme variant.")
     print("")
     print("Options:")
     print("  --help                         Show this commandline info")
@@ -55,6 +57,10 @@ def download_file(url, filepath):
     global verbose
     if verbose:
         print(f"Downloading from {url} to {filepath}")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        print_error(f"Unsupported URL scheme: {parsed.scheme}")
+        return False
     request = urllib.request.Request(
         url,
         data=None,
@@ -63,10 +69,8 @@ def download_file(url, filepath):
         }
     )
     try:
-        response = urllib.request.urlopen(request)
-        file = open(filepath, mode="wb")
-        file.write(response.read())
-        file.close()
+        with urllib.request.urlopen(request, timeout=30) as response, open(filepath, mode="wb") as file:
+            file.write(response.read())
         return True
     except OSError as error:
         if verbose:
@@ -266,6 +270,14 @@ def get_manifest_target_platforms(manifest, requested_platform):
 
 #region SDK download
 
+def safe_extract_zip(zip_ref, target_dir):
+    target_dir = os.path.realpath(target_dir)
+    for member in zip_ref.infolist():
+        dest = os.path.realpath(os.path.join(target_dir, member.filename))
+        if not dest.startswith(target_dir + os.sep):
+            raise ValueError(f"Invalid zip entry: {member.filename}")
+    zip_ref.extractall(target_dir)
+
 def sdk_download(version, platform):
     sdk_root_dir = get_sdk_root_dir(version, platform)
     os.makedirs(sdk_root_dir, exist_ok=True)
@@ -293,7 +305,7 @@ def sdk_download(version, platform):
         print_error(f"Failed to download {sdk_zip_source_url} to {sdk_zip_target_filepath}")
         return False
     with zipfile.ZipFile(sdk_zip_target_filepath, "r") as zip_ref:
-        zip_ref.extractall(os.path.join(sdk_root_dir, "TactilitySDK"))
+        safe_extract_zip(zip_ref, os.path.join(sdk_root_dir, "TactilitySDK"))
     return True
 
 def sdk_download_all(version, platforms):
@@ -379,7 +391,7 @@ def build_first(version, platform, skip_build):
     shell_needed = sys.platform == "win32"
     build_command = ["idf.py", "-B", cmake_path, "build"]
     if verbose:
-        print(f"Running command: {" ".join(build_command)}")
+        print(f"Running command: {' '.join(build_command)}")
     with subprocess.Popen(build_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=shell_needed) as process:
         build_output = wait_for_process(process)
         # The return code is never expected to be 0 due to a bug in the elf cmake script, but we keep it just in case
@@ -429,8 +441,9 @@ def build_consecutively(version, platform, skip_build):
 def package_intermediate_manifest(target_path):
     if not os.path.isfile("manifest.properties"):
         print_error("manifest.properties not found")
-        return
+        return False
     shutil.copy("manifest.properties", os.path.join(target_path, "manifest.properties"))
+    return True
 
 def package_intermediate_binaries(target_path, platforms):
     elf_dir = os.path.join(target_path, "elf")
@@ -439,8 +452,9 @@ def package_intermediate_binaries(target_path, platforms):
         elf_path = find_elf_file(platform)
         if elf_path is None:
             print_error(f"ELF file not found at {elf_path}")
-            return
+            return False
         shutil.copy(elf_path, os.path.join(elf_dir, f"{platform}.elf"))
+    return True
 
 def package_intermediate_assets(target_path):
     if os.path.isdir("assets"):
@@ -451,20 +465,24 @@ def package_intermediate(platforms):
     if os.path.isdir(target_path):
         shutil.rmtree(target_path)
     os.makedirs(target_path, exist_ok=True)
-    package_intermediate_manifest(target_path)
-    package_intermediate_binaries(target_path, platforms)
+    if not package_intermediate_manifest(target_path):
+        return False
+    if not package_intermediate_binaries(target_path, platforms):
+        return False
     package_intermediate_assets(target_path)
+    return True
 
 def package_name(platforms):
     elf_path = find_elf_file(platforms[0])
     elf_base_name = os.path.basename(elf_path).removesuffix(".app.elf")
     return os.path.join("build", f"{elf_base_name}.app")
 
-
 def package_all(platforms):
     status = f"Building package with {platforms}"
     print_status_busy(status)
-    package_intermediate(platforms)
+    if not package_intermediate(platforms):
+        print_status_error("Building package failed: missing inputs")
+        return False
     # Create build/something.app
     try:
         tar_path = package_name(platforms)
@@ -483,7 +501,7 @@ def setup_environment():
     global ttbuild_path
     os.makedirs(ttbuild_path, exist_ok=True)
 
-def build_action(manifest, platform_arg):
+def build_action(manifest, platform_arg, skip_build):
     # Environment validation
     validate_environment()
     platforms_to_build = get_manifest_target_platforms(manifest, platform_arg)
@@ -507,7 +525,8 @@ def build_action(manifest, platform_arg):
     if not build_all(sdk_version, platforms_to_build, skip_build):  # Environment validation
         return False
     if not skip_build:
-        package_all(platforms_to_build)
+        if not package_all(platforms_to_build):
+            return False
     return True
 
 def clean_action():
@@ -538,7 +557,7 @@ def get_device_info(ip):
     print_status_busy(f"Requesting device info")
     url = get_url(ip, "/info")
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=http_timeout_seconds)
         if response.status_code != 200:
             print_error("Run failed")
         else:
@@ -553,7 +572,7 @@ def run_action(manifest, ip):
     url = get_url(ip, "/app/run")
     params = {'id': app_id}
     try:
-        response = requests.post(url, params=params)
+        response = requests.post(url, params=params, timeout=http_timeout_seconds)
         if response.status_code != 200:
             print_error("Run failed")
         else:
@@ -577,7 +596,7 @@ def install_action(ip, platforms):
             files = {
                 'elf': file
             }
-            response = requests.put(url, files=files)
+            response = requests.put(url, files=files, timeout=http_timeout_seconds)
             if response.status_code != 200:
                 print_status_error("Install failed")
                 return False
@@ -597,7 +616,7 @@ def uninstall_action(manifest, ip):
     url = get_url(ip, "/app/uninstall")
     params = {'id': app_id}
     try:
-        response = requests.put(url, params=params)
+        response = requests.put(url, params=params, timeout=http_timeout_seconds)
         if response.status_code != 200:
             print_status_error("Server responded that uninstall failed")
         else:
@@ -646,7 +665,7 @@ if __name__ == "__main__":
         platform = None
         if len(sys.argv) > 2:
             platform = sys.argv[2]
-        if not build_action(manifest, platform):
+        if not build_action(manifest, platform, skip_build):
             sys.exit(1)
     elif action_arg == "clean":
         clean_action()
@@ -683,7 +702,7 @@ if __name__ == "__main__":
         if len(sys.argv) >= 4:
             platform = sys.argv[3]
             platforms_to_install = [platform]
-        if build_action(manifest, platform):
+        if build_action(manifest, platform, skip_build):
             if install_action(sys.argv[2], platforms_to_install):
                 run_action(manifest, sys.argv[2])
     else:
