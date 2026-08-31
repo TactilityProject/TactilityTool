@@ -1,5 +1,5 @@
 {
 	"toolCompatibility": "^.*$",
-	"toolVersion": "4.2.0",
+	"toolVersion": "5.0.0",
 	"toolDownloadUrl": "https://raw.githubusercontent.com/TactilityProject/TactilityTool/refs/heads/main/tactility.py"
 }
