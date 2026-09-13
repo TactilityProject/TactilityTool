@@ -16,3 +16,6 @@ CONFIG_ESP_SYSTEM_MEMPROT_FEATURE_LOCK=n
 
 # Platform
 CONFIG_IDF_TARGET="esp32p4"
+
+# Force newlib for IDF 6.x and higher
+CONFIG_LIBC_NEWLIB=y
