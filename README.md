@@ -1,3 +1,5 @@
+!!! **This project is archived. It is now embedded into the main Tactility project** !!!
+
 # Tactility Tool
 
 This is the build tool for building ESP32 applications.
